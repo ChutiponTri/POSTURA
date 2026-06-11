@@ -103,7 +103,7 @@ export default function PosturaApp() {
           </div>
           <div className="flex items-center gap-4">
             {isConnected && <BatteryMedium className="text-green-500" size={20} />}
-            <UserButton afterSignOutUrl="/"/>
+            <UserButton />
           </div>
         </header>
 
