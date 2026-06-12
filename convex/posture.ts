@@ -1,57 +1,79 @@
-import { mutation, query } from "./_generated/server";
+// convex/posture.ts
 import { v } from "convex/values";
+import { mutation, query } from "./_generated/server";
 
-// ดึงข้อมูล Logs ของผู้ใช้
-export const getLogs = query({
-  args: { userId: v.string() },
-  handler: async (ctx, args) => {
-    return await ctx.db
-      .query("postureLogs")
-      .withIndex("by_user", (q) => q.eq("userId", args.userId))
-      .order("desc")
-      .take(100); // ดึง 100 รายการล่าสุด
-  },
-});
-
-// บันทึกข้อมูลที่ Sync มาจาก Bluetooth แบบ Batch
+// ── Save a batch of logs from BLE sync ────────────────────────────────────────
 export const saveLogsBatch = mutation({
   args: {
     userId: v.string(),
-    logs: v.array(v.object({
-      timestamp: v.number(),
-      pitch: v.number(),
-      state: v.number(),
-    }))
+    logs: v.array(
+      v.object({
+        timestamp: v.number(),
+        pitch: v.number(),
+        state: v.number(),
+      })
+    ),
   },
-  handler: async (ctx, args) => {
-    for (const log of args.logs) {
+  handler: async (ctx, { userId, logs }) => {
+    // Deduplicate: only insert if timestamp not already stored for this user
+    const existing = await ctx.db
+      .query("postureLogs")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .collect();
+
+    const existingTs = new Set(existing.map((e) => e.timestamp));
+
+    const toInsert = logs.filter((l) => !existingTs.has(l.timestamp));
+
+    for (const log of toInsert) {
       await ctx.db.insert("postureLogs", {
-        userId: args.userId,
+        userId,
         timestamp: log.timestamp,
         pitch: log.pitch,
         state: log.state,
       });
     }
+
+    return { inserted: toInsert.length, skipped: logs.length - toInsert.length };
   },
 });
 
-// บันทึกการตั้งค่า
-export const saveSettings = mutation({
-  args: { userId: v.string(), warnThreshold: v.number(), alertThreshold: v.number() },
-  handler: async (ctx, args) => {
-    const existing = await ctx.db
-      .query("deviceSettings")
-      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
-      .first();
+// ── Get logs for last N days ───────────────────────────────────────────────────
+export const getLogs = query({
+  args: {
+    userId: v.string(),
+    limitDays: v.optional(v.number()),
+  },
+  handler: async (ctx, { userId, limitDays = 7 }) => {
+    const cutoff = Math.floor(Date.now() / 1000) - limitDays * 86400;
 
-    if (existing) {
-      await ctx.db.patch(existing._id, { warnThreshold: args.warnThreshold, alertThreshold: args.alertThreshold });
-    } else {
-      await ctx.db.insert("deviceSettings", {
-        userId: args.userId,
-        warnThreshold: args.warnThreshold,
-        alertThreshold: args.alertThreshold,
-      });
+    const logs = await ctx.db
+      .query("postureLogs")
+      .withIndex("by_user_time", (q) =>
+        q.eq("userId", userId).gte("timestamp", cutoff)
+      )
+      .order("asc")
+      .collect();
+
+    return logs.map((l) => ({
+      timestamp: l.timestamp,
+      pitch: l.pitch,
+      state: l.state,
+    }));
+  },
+});
+
+// ── Delete all logs for user (optional admin use) ─────────────────────────────
+export const clearLogs = mutation({
+  args: { userId: v.string() },
+  handler: async (ctx, { userId }) => {
+    const logs = await ctx.db
+      .query("postureLogs")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .collect();
+    for (const log of logs) {
+      await ctx.db.delete(log._id);
     }
+    return { deleted: logs.length };
   },
 });
