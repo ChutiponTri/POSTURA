@@ -193,10 +193,10 @@ function SpineVisualizer({ angle }: { angle: number }) {
 }
 
 // ─── PostureScore Ring ────────────────────────────────────────────────────────
-function PostureRing({ score, grade }: { score: number; grade: ReturnType<typeof scoreToGrade> }) {
+function PostureRing({ score, grade }: { score: number | null; grade: ReturnType<typeof scoreToGrade> }) {
   const r = 44;
   const circ = 2 * Math.PI * r;
-  const dash = (score / 100) * circ;
+  const dash = ((score ?? 0) / 100) * circ;
 
   return (
     <div className="relative inline-flex items-center justify-center w-28 h-28">
@@ -211,8 +211,16 @@ function PostureRing({ score, grade }: { score: number; grade: ReturnType<typeof
         />
       </svg>
       <div className="relative text-center">
-        <div className="text-2xl font-bold" style={{ color: grade.color }}>{score}</div>
-        <div className="text-[10px] text-slate-400 font-semibold">{grade.label}</div>
+        {score === null
+          ? <>
+              <div className="text-xl font-bold" style={{ color: "#cbd5e1" }}>—</div>
+              <div className="text-[9px] font-semibold" style={{ color: "#cbd5e1" }}>Sync first</div>
+            </>
+          : <>
+              <div className="text-2xl font-bold" style={{ color: grade.color }}>{score}</div>
+              <div className="text-[10px] text-slate-400 font-semibold">{grade.label}</div>
+            </>
+        }
       </div>
     </div>
   );
@@ -239,6 +247,8 @@ export default function PosturaApp() {
   const [liveAngle, setLiveAngle] = useState(0);
   const [sessionLogs, setSessionLogs] = useState<PostureLog[]>([]);
   const [pendingPayload, setPendingPayload] = useState("");
+  const [hasSynced, setHasSynced] = useState(false);
+  const [syncedRecordCount, setSyncedRecordCount] = useState(0);
 
   // Convex
   const saveLogs = useMutation(api.posture.saveLogsBatch);
@@ -255,15 +265,21 @@ export default function PosturaApp() {
 
   const totalRecords = todayLogs.length;
   const badLogs = todayLogs.filter((l) => l.state > 0);
-  const goodTimeMin = Math.round(((totalRecords - badLogs.length) * 5) / 60);
+  // firmware logs bad events every 5s interval; good time isn't tracked in hardware
+  // badTimeMin = confirmed bad; goodTimeMin shown only after sync (can't know without sync)
   const badTimeMin = Math.round((badLogs.length * 5) / 60);
+  const goodTimeMin = null; // not available from firmware — only bad events are stored
   const alertLogs = todayLogs.filter((l) => l.state === 2);
 
-  const postureScore = totalRecords === 0
-    ? 100
-    : Math.max(0, Math.round(100 - (badLogs.length / totalRecords) * 100 - alertLogs.length * 2));
+  // firmware only records bad events — "0 records after sync" means perfect posture
+  // "0 records before any sync" means unknown (no data yet)
+  const postureScore = !hasSynced && totalRecords === 0
+    ? null  // unknown — haven't synced yet today
+    : totalRecords === 0
+      ? 100  // synced, no bad events = perfect
+      : Math.max(0, Math.round(100 - (badLogs.length / totalRecords) * 100 - alertLogs.length * 2));
 
-  const grade = scoreToGrade(postureScore);
+  const grade = scoreToGrade(postureScore ?? 100);
 
   // Hourly bar data for today
   const hourlyData = Array.from({ length: 24 }, (_, h) => {
@@ -312,11 +328,17 @@ export default function PosturaApp() {
       setSyncStatus("done");
       setIsSyncing(false);
       setSyncProgress(100);
+      setHasSynced(true);
       // Parse accumulated payload and save
+      // NOTE: firmware only logs BAD posture events (state > 0)
+      // Empty payload = posture was perfect the whole session — still a valid sync
       setPendingPayload((prev) => {
         const newLogs = parseCSVPayload(prev);
+        setSyncedRecordCount(newLogs.length);
         setSessionLogs(newLogs);
-        setLiveAngle(newLogs[newLogs.length - 1]?.pitch ?? 0);
+        if (newLogs.length > 0) {
+          setLiveAngle(newLogs[newLogs.length - 1]?.pitch ?? 0);
+        }
         // Save to Convex
         if (user && newLogs.length > 0) {
           saveLogs({ userId: user.id, logs: newLogs });
@@ -471,7 +493,7 @@ export default function PosturaApp() {
         )}
         {syncStatus === "done" && (
           <p className="text-green-300 text-xs text-center mt-2 relative z-10 flex items-center justify-center gap-1">
-            <CheckCircle size={13} /> Synced {sessionLogs.length} records
+            <CheckCircle size={13} /> {syncedRecordCount === 0 ? "Perfect posture session — no bad events recorded!" : `Synced ${syncedRecordCount} posture events`}
           </p>
         )}
       </div>
@@ -479,8 +501,13 @@ export default function PosturaApp() {
       {/* Quick Stats Row */}
       <div className="grid grid-cols-3 gap-3">
         <div className="bg-green-50 rounded-2xl p-3 text-center">
-          <p className="text-[10px] font-bold text-green-600 mb-1">Good</p>
-          <p className="text-lg font-bold text-slate-800">{goodTimeMin}<span className="text-xs text-slate-400">m</span></p>
+          <p className="text-[10px] font-bold text-green-600 mb-1">Status</p>
+          {!hasSynced
+            ? <p className="text-sm font-bold text-slate-400">—</p>
+            : badTimeMin === 0
+              ? <p className="text-sm font-bold text-green-600">Perfect</p>
+              : <p className="text-lg font-bold text-slate-800">{Math.max(0, postureScore ?? 0)}<span className="text-xs text-slate-400">pts</span></p>
+          }
         </div>
         <div className="bg-red-50 rounded-2xl p-3 text-center">
           <p className="text-[10px] font-bold text-red-500 mb-1">Slouch</p>
@@ -548,7 +575,7 @@ export default function PosturaApp() {
       <div className="bg-white border border-slate-100 rounded-3xl p-5 shadow-sm">
         <h3 className="text-sm font-semibold text-slate-500 mb-1">Weekly posture score</h3>
         <div className="flex items-baseline gap-1 mb-4">
-          <span className="text-3xl font-bold text-slate-800">{postureScore}</span>
+          <span className="text-3xl font-bold text-slate-800">{postureScore ?? "—"}</span>
           <span className="text-sm text-slate-400">/100 today</span>
           <span
             className={`ml-auto text-xs font-bold px-2 py-0.5 rounded-full`}
@@ -639,13 +666,13 @@ export default function PosturaApp() {
           <Zap size={15} className="text-[#655DDD]" /> Insights
         </h3>
         <div className="space-y-3">
-          {postureScore >= 85 && (
+          {(postureScore ?? 0) >= 85 && (
             <div className="flex gap-3 items-start">
               <CheckCircle size={16} className="text-green-500 mt-0.5 shrink-0" />
-              <p className="text-sm text-slate-600">Great posture day! You maintained good alignment for {goodTimeMin} minutes.</p>
+              <p className="text-sm text-slate-600">Great posture day! No bad posture events recorded.</p>
             </div>
           )}
-          {badTimeMin > 30 && (
+          {(badTimeMin ?? 0) > 30 && (
             <div className="flex gap-3 items-start">
               <AlertTriangle size={16} className="text-amber-500 mt-0.5 shrink-0" />
               <p className="text-sm text-slate-600">You spent {badTimeMin}m in poor posture. Try standing up every 30 minutes.</p>
@@ -674,9 +701,9 @@ export default function PosturaApp() {
       Math.max(1, weeklyData.filter((d) => d.score !== null).length);
 
     const goals = [
-      { id: "score", label: "Score ≥ 80 today", done: postureScore >= 80, value: postureScore, max: 80 },
+      { id: "score", label: "Score ≥ 80 today", done: (postureScore ?? 0) >= 80, value: postureScore ?? 0, max: 80 },
       { id: "streak", label: "3-day streak", done: streakDays >= 3, value: streakDays, max: 3 },
-      { id: "good", label: "2h good posture", done: goodTimeMin >= 120, value: goodTimeMin, max: 120 },
+      { id: "good", label: "No slouch today", done: hasSynced && badTimeMin === 0, value: hasSynced ? (badTimeMin === 0 ? 1 : 0) : 0, max: 1 },
       { id: "alert", label: "< 5 alerts today", done: alertLogs.length < 5, value: Math.max(0, 5 - alertLogs.length), max: 5 },
     ];
 
@@ -876,7 +903,7 @@ export default function PosturaApp() {
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex justify-center">
-      <div className="w-full max-w-md bg-white shadow-xl min-h-screen relative flex flex-col">
+      <div className="w-full max-w-md bg-white shadow-xl min-h-screen flex flex-col">
 
         {/* Header */}
         <header className="px-6 py-4 flex justify-between items-center border-b border-slate-100 sticky top-0 bg-white/95 backdrop-blur z-20">
@@ -898,7 +925,7 @@ export default function PosturaApp() {
         </header>
 
         {/* Content */}
-        <main className="flex-1 overflow-y-auto pb-28 p-5 space-y-5">
+        <main className="flex-1 overflow-y-auto pb-32 p-5 space-y-5">
           {activeTab === "dashboard" && renderDashboard()}
           {activeTab === "trends" && renderTrends()}
           {activeTab === "progress" && renderProgress()}
@@ -906,7 +933,7 @@ export default function PosturaApp() {
         </main>
 
         {/* Bottom Nav */}
-        <nav className="absolute bottom-0 w-full bg-white/95 backdrop-blur border-t border-slate-100 px-4 py-3 pb-7 flex justify-around items-center rounded-t-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.04)]">
+        <nav className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md bg-white/95 backdrop-blur border-t border-slate-100 px-4 py-3 pb-7 flex justify-around items-center rounded-t-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.06)] z-30">
           {[
             { id: "dashboard", icon: Home, label: "Today" },
             { id: "trends", icon: BarChart2, label: "Trends" },
