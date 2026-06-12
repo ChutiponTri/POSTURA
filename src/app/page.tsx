@@ -233,11 +233,12 @@ export default function PosturaApp() {
 
   // BLE State
   const [isConnected, setIsConnected] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [syncStatus, setSyncStatus] = useState<"idle" | "connecting" | "syncing" | "done" | "error">("idle");
+  const [connStatus, setConnStatus] = useState<"idle" | "connecting" | "live" | "pulling" | "error">("idle");
   const [bleDevice, setBleDevice] = useState<BluetoothDevice | null>(null);
   const [rxCharRef, setRxCharRef] = useState<BluetoothRemoteGATTCharacteristic | null>(null);
-  const [syncProgress, setSyncProgress] = useState(0);
+  const [txCharRef, setTxCharRef] = useState<BluetoothRemoteGATTCharacteristic | null>(null);
+  // live angle from real-time notifications (state 0 = good posture too, via periodic ping from firmware)
+  const pendingPayloadRef = useRef("");
 
   // Device Settings
   const [warnThresh, setWarnThresh] = useState(15);
@@ -246,7 +247,6 @@ export default function PosturaApp() {
   // Live & Historical Data
   const [liveAngle, setLiveAngle] = useState(0);
   const [sessionLogs, setSessionLogs] = useState<PostureLog[]>([]);
-  const [pendingPayload, setPendingPayload] = useState("");
   const [hasSynced, setHasSynced] = useState(false);
   const [syncedRecordCount, setSyncedRecordCount] = useState(0);
 
@@ -316,46 +316,95 @@ export default function PosturaApp() {
     .slice(0, 3);
 
   // Streak
-  const streakDays = weeklyData.filter((d) => d.score !== null && d.score >= 70).length;
+  const streakDays = weeklyData.filter((d: { score: number | null; day: string; sessions: number }) => d.score !== null && d.score >= 70).length;
 
   // ── BLE Core ─────────────────────────────────────────────────────────────────
+  //
+  // Protocol:
+  //   TX characteristic (notify): device → web
+  //     • Real-time: "ts,pitch,state" for every bad-posture event as it happens
+  //     • Historical batch: "ts,pitch,state|ts,pitch,state|..." ended by "EOF"
+  //     • Live heartbeat: "LIVE:pitch" sent by firmware every few seconds regardless of posture
+  //   RX characteristic (write): web → device
+  //     • SYNC:<unix>  — set device RTC
+  //     • GET          — request stored logs (triggers historical batch above)
+  //     • SET_WARN:<n> — set warning threshold
+  //     • SET_ALERT:<n>— set alert threshold
+  //     • CLEAR        — erase stored logs from device flash
+  //
+  // On connect we:
+  //   1. startNotifications() immediately — live updates from this point on
+  //   2. SYNC:<time>  — calibrate device RTC
+  //   3. GET          — pull historical logs stored on device
+  //   After EOF, historical pull is done; notifications keep streaming live events.
+
   const handleNotification = useCallback((event: Event) => {
     const value = (event.target as BluetoothRemoteGATTCharacteristic).value;
     if (!value) return;
     const text = new TextDecoder().decode(value);
 
+    // ── Live heartbeat: "LIVE:12.5" — device sends current pitch every ~2s ──
+    // NOTE: firmware as-shipped doesn't send this, but if you add a periodic
+    // notify in handleRunning() we handle it here cleanly.
+    if (text.startsWith("LIVE:")) {
+      const pitch = parseFloat(text.substring(5));
+      if (!isNaN(pitch)) setLiveAngle(pitch);
+      return;
+    }
+
+    // ── End of historical batch ──────────────────────────────────────────────
     if (text === "EOF") {
-      setSyncStatus("done");
-      setIsSyncing(false);
-      setSyncProgress(100);
+      setConnStatus("live");
       setHasSynced(true);
-      // Parse accumulated payload and save
-      // NOTE: firmware only logs BAD posture events (state > 0)
-      // Empty payload = posture was perfect the whole session — still a valid sync
-      setPendingPayload((prev) => {
-        const newLogs = parseCSVPayload(prev);
-        setSyncedRecordCount(newLogs.length);
-        setSessionLogs(newLogs);
-        if (newLogs.length > 0) {
-          setLiveAngle(newLogs[newLogs.length - 1]?.pitch ?? 0);
-        }
-        // Save to Convex
-        if (user && newLogs.length > 0) {
-          saveLogs({ userId: user.id, logs: newLogs });
-        }
-        return "";
+      const newLogs = parseCSVPayload(pendingPayloadRef.current);
+      pendingPayloadRef.current = "";
+      setSyncedRecordCount(newLogs.length);
+      setSessionLogs((prev: PostureLog[]) => {
+        // merge with any already-received live events (dedup by timestamp)
+        const existingTs = new Set(prev.map((l: PostureLog) => l.timestamp));
+        const merged = [...prev, ...newLogs.filter((l) => !existingTs.has(l.timestamp))];
+        merged.sort((a, b) => a.timestamp - b.timestamp);
+        return merged;
       });
-    } else {
-      setPendingPayload((prev) => prev + text);
-      setSyncProgress((p) => Math.min(p + 10, 90));
+      if (newLogs.length > 0) {
+        setLiveAngle(newLogs[newLogs.length - 1].pitch);
+      }
+      if (user && newLogs.length > 0) {
+        saveLogs({ userId: user.id, logs: newLogs });
+      }
+      return;
+    }
+
+    // ── Historical batch chunk (accumulate until EOF) ────────────────────────
+    // Chunks look like: "ts,pitch,state|ts,pitch,state|"
+    if (text.includes("|")) {
+      pendingPayloadRef.current += text;
+      return;
+    }
+
+    // ── Live single event: "ts,pitch,state" ─────────────────────────────────
+    // Firmware can also call pTxCharacteristic->notify() for immediate events.
+    const parts = text.split(",");
+    if (parts.length === 3) {
+      const [ts, pitch, state] = parts.map(Number);
+      if (!isNaN(ts)) {
+        setLiveAngle(pitch);
+        const newLog: PostureLog = { timestamp: ts, pitch, state };
+        setSessionLogs((prev: PostureLog[]) => {
+          if (prev.find((l: PostureLog) => l.timestamp === ts)) return prev;
+          const merged = [...prev, newLog].sort((a: PostureLog, b: PostureLog) => a.timestamp - b.timestamp);
+          return merged;
+        });
+        if (user && state > 0) {
+          saveLogs({ userId: user.id, logs: [newLog] });
+        }
+      }
     }
   }, [user, saveLogs]);
 
-  const connectAndSync = async () => {
+  const connect = async () => {
     try {
-      setSyncStatus("connecting");
-      setIsSyncing(true);
-      setSyncProgress(5);
+      setConnStatus("connecting");
 
       let device = bleDevice;
       if (!device) {
@@ -366,43 +415,55 @@ export default function PosturaApp() {
         setBleDevice(device);
         device.addEventListener("gattserverdisconnected", () => {
           setIsConnected(false);
-          setSyncStatus("idle");
+          setConnStatus("idle");
+          setTxCharRef(null);
+          setRxCharRef(null);
         });
       }
 
       const server = await device.gatt?.connect();
       setIsConnected(true);
-      setSyncStatus("syncing");
-      setSyncProgress(20);
 
       const service = await server?.getPrimaryService(BLE_SERVICE_UUID);
       const rxChar = await service?.getCharacteristic(BLE_CHAR_RX_UUID);
       const txChar = await service?.getCharacteristic(BLE_CHAR_TX_UUID);
       setRxCharRef(rxChar ?? null);
+      setTxCharRef(txChar ?? null);
 
-      // Subscribe to notifications (data coming from device)
+      // Step 1: subscribe to all future notifications (live + historical)
       await txChar?.startNotifications();
       txChar?.addEventListener("characteristicvaluechanged", handleNotification);
-      setSyncProgress(35);
 
-      // Send current Unix timestamp for RTC sync
+      // Step 2: sync device RTC to current time
       const encoder = new TextEncoder();
-      const unixTime = Math.floor(Date.now() / 1000);
-      await rxChar?.writeValue(encoder.encode(`SYNC:${unixTime}`));
-      setSyncProgress(50);
-
+      await rxChar?.writeValue(encoder.encode(`SYNC:${Math.floor(Date.now() / 1000)}`));
       await new Promise((r) => setTimeout(r, 200));
 
-      // Request all stored logs
+      // Step 3: pull stored logs — device will stream them as notifications
+      setConnStatus("pulling");
+      pendingPayloadRef.current = "";
       await rxChar?.writeValue(encoder.encode("GET"));
-      setSyncProgress(60);
+      // connStatus → "live" once EOF is received in handleNotification
 
     } catch (err) {
       console.error("BLE Error:", err);
-      setSyncStatus("error");
-      setIsSyncing(false);
+      setConnStatus("error");
       setIsConnected(false);
     }
+  };
+
+  const disconnect = async () => {
+    try {
+      if (txCharRef) {
+        await txCharRef.stopNotifications();
+        txCharRef.removeEventListener("characteristicvaluechanged", handleNotification);
+      }
+      bleDevice?.gatt?.disconnect();
+    } catch (_) {}
+    setIsConnected(false);
+    setConnStatus("idle");
+    setTxCharRef(null);
+    setRxCharRef(null);
   };
 
   const applySettingsToDevice = async () => {
@@ -441,6 +502,7 @@ export default function PosturaApp() {
         <div className="absolute -top-4 -right-4 opacity-10">
           <Activity size={120} />
         </div>
+        {/* Status row */}
         <div className="flex items-center justify-between mb-4 relative z-10">
           <div>
             <p className="text-xs font-semibold opacity-70 uppercase tracking-widest mb-0.5">Live Status</p>
@@ -449,7 +511,13 @@ export default function PosturaApp() {
                 {isConnected && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />}
                 <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${isConnected ? "bg-green-400" : "bg-slate-400"}`} />
               </span>
-              <span className="font-bold text-sm">{isConnected ? "Connected" : "Not Connected"}</span>
+              <span className="font-bold text-sm">
+                {connStatus === "connecting" ? "Connecting…"
+                  : connStatus === "pulling" ? "Loading history…"
+                  : connStatus === "live" ? "Live · Monitoring"
+                  : connStatus === "error" ? "Connection failed"
+                  : "Not connected"}
+              </span>
             </div>
           </div>
           {isConnected && <BatteryMedium size={20} className="opacity-80" />}
@@ -467,33 +535,49 @@ export default function PosturaApp() {
           </div>
         </div>
 
-        {/* Sync Button */}
-        <button
-          onClick={connectAndSync}
-          disabled={isSyncing}
-          className="bg-white text-[#655DDD] px-5 py-3 rounded-full font-bold w-full flex items-center justify-center gap-2 transition-transform active:scale-95 shadow-md relative z-10"
-        >
-          {isSyncing ? (
-            <>
-              <RotateCcw className="animate-spin" size={17} />
-              <span>Syncing… {syncProgress}%</span>
-            </>
-          ) : (
-            <>
-              <Bluetooth size={17} />
-              {bleDevice ? (isConnected ? "Sync Now" : "Reconnect") : "Pair & Sync"}
-            </>
-          )}
-        </button>
-
-        {syncStatus === "error" && (
-          <p className="text-red-300 text-xs text-center mt-2 relative z-10">
-            Connection failed. Make sure POSTURA is nearby and powered on.
-          </p>
+        {/* Connect / Disconnect button */}
+        {!isConnected ? (
+          <button
+            onClick={connect}
+            disabled={connStatus === "connecting"}
+            className="bg-white text-[#655DDD] px-5 py-3 rounded-full font-bold w-full flex items-center justify-center gap-2 transition-transform active:scale-95 shadow-md relative z-10 disabled:opacity-60"
+          >
+            {connStatus === "connecting"
+              ? <><RotateCcw className="animate-spin" size={17} /><span>Connecting…</span></>
+              : <><Bluetooth size={17} /><span>{bleDevice ? "Reconnect" : "Pair & Connect"}</span></>
+            }
+          </button>
+        ) : (
+          <div className="flex gap-3 relative z-10">
+            {connStatus === "pulling" && (
+              <div className="flex-1 bg-white/20 rounded-full px-4 py-3 flex items-center justify-center gap-2">
+                <RotateCcw className="animate-spin opacity-80" size={16} />
+                <span className="text-sm font-semibold opacity-90">Loading history…</span>
+              </div>
+            )}
+            {connStatus === "live" && (
+              <div className="flex-1 bg-white/20 rounded-full px-4 py-3 flex items-center justify-center gap-2">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-300 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-green-300" />
+                </span>
+                <span className="text-sm font-semibold opacity-90">
+                  {syncedRecordCount === 0 && hasSynced ? "Perfect posture ✓" : `${sessionLogs.length} events today`}
+                </span>
+              </div>
+            )}
+            <button
+              onClick={disconnect}
+              className="bg-white/20 hover:bg-white/30 rounded-full px-4 py-3 font-semibold text-sm transition-colors"
+            >
+              Disconnect
+            </button>
+          </div>
         )}
-        {syncStatus === "done" && (
-          <p className="text-green-300 text-xs text-center mt-2 relative z-10 flex items-center justify-center gap-1">
-            <CheckCircle size={13} /> {syncedRecordCount === 0 ? "Perfect posture session — no bad events recorded!" : `Synced ${syncedRecordCount} posture events`}
+
+        {connStatus === "error" && (
+          <p className="text-red-300 text-xs text-center mt-2 relative z-10">
+            Could not connect. Make sure POSTURA is on and nearby.
           </p>
         )}
       </div>
@@ -598,7 +682,7 @@ export default function PosturaApp() {
               <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
               <Tooltip
                 contentStyle={{ borderRadius: "12px", border: "none", boxShadow: "0 4px 12px rgba(0,0,0,0.08)", fontSize: 12 }}
-                formatter={(v) => [`${v ?? ""}`, "Score"]}
+                formatter={(v: unknown) => [`${v ?? ""}`, "Score"]}
               />
               <ReferenceLine y={70} stroke="#10b981" strokeDasharray="4 4" strokeWidth={1.5} label={{ value: "Target 70", position: "insideTopRight", fontSize: 9, fill: "#10b981" }} />
               <Area type="monotone" dataKey="score" stroke="#655DDD" strokeWidth={2.5} fillOpacity={1} fill="url(#scoreGrad)" dot={{ r: 4, fill: "#655DDD", strokeWidth: 2, stroke: "#fff" }} connectNulls />
@@ -637,7 +721,7 @@ export default function PosturaApp() {
           <div className="h-36 w-full">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart
-                data={sessionLogs.slice(-60).map((l, i) => ({ i, angle: l.pitch, state: l.state }))}
+                data={sessionLogs.slice(-60).map((l: PostureLog, i: number) => ({ i, angle: l.pitch, state: l.state }))}
                 margin={{ top: 4, right: 4, left: -28, bottom: 0 }}
               >
                 <XAxis hide />
@@ -645,7 +729,7 @@ export default function PosturaApp() {
                 <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                 <Tooltip
                   contentStyle={{ borderRadius: "12px", border: "none", fontSize: 11 }}
-                  formatter={(v) => [`${v ?? ""}°`, "Pitch"]}
+                  formatter={(v: unknown) => [`${v ?? ""}°`, "Pitch"]}
                 />
                 <ReferenceLine y={warnThresh} stroke="#f59e0b" strokeDasharray="4 2" strokeWidth={1.5} />
                 <ReferenceLine y={alertThresh} stroke="#ef4444" strokeDasharray="4 2" strokeWidth={1.5} />
@@ -724,7 +808,7 @@ export default function PosturaApp() {
               <p className="text-xs opacity-70">Day streak</p>
             </div>
             <div className="border-l border-white/20 pl-5">
-              <p className="text-3xl font-bold">{weeklyData.filter((d) => d.score !== null && d.score >= 70).length}</p>
+              <p className="text-3xl font-bold">{weeklyData.filter((d: { score: number | null; day: string; sessions: number }) => d.score !== null && d.score >= 70).length}</p>
               <p className="text-xs opacity-70">Good days</p>
             </div>
           </div>
@@ -823,7 +907,7 @@ export default function PosturaApp() {
           </div>
           <input
             type="range" min="10" max="25" value={warnThresh}
-            onChange={(e) => setWarnThresh(Number(e.target.value))}
+            onChange={(e: { target: HTMLInputElement }) => setWarnThresh(Number(e.target.value))}
             className="w-full accent-amber-500 h-2 bg-slate-100 rounded-lg appearance-none"
           />
           <div className="flex justify-between text-[10px] text-slate-300 mt-1">
@@ -841,7 +925,7 @@ export default function PosturaApp() {
           </div>
           <input
             type="range" min="20" max="40" value={alertThresh}
-            onChange={(e) => setAlertThresh(Number(e.target.value))}
+            onChange={(e: { target: HTMLInputElement }) => setAlertThresh(Number(e.target.value))}
             className="w-full accent-red-500 h-2 bg-slate-100 rounded-lg appearance-none"
           />
           <div className="flex justify-between text-[10px] text-slate-300 mt-1">
