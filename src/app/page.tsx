@@ -571,7 +571,7 @@ export default function PosturaApp() {
               <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
               <Tooltip
                 contentStyle={{ borderRadius: "12px", border: "none", boxShadow: "0 4px 12px rgba(0,0,0,0.08)", fontSize: 12 }}
-                formatter={(v: number) => [`${v}`, "Score"]}
+                formatter={(v) => [`${v ?? ""}`, "Score"]}
               />
               <ReferenceLine y={70} stroke="#10b981" strokeDasharray="4 4" strokeWidth={1.5} label={{ value: "Target 70", position: "insideTopRight", fontSize: 9, fill: "#10b981" }} />
               <Area type="monotone" dataKey="score" stroke="#655DDD" strokeWidth={2.5} fillOpacity={1} fill="url(#scoreGrad)" dot={{ r: 4, fill: "#655DDD", strokeWidth: 2, stroke: "#fff" }} connectNulls />
@@ -618,7 +618,7 @@ export default function PosturaApp() {
                 <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                 <Tooltip
                   contentStyle={{ borderRadius: "12px", border: "none", fontSize: 11 }}
-                  formatter={(v: number) => [`${v}°`, "Pitch"]}
+                  formatter={(v) => [`${v ?? ""}°`, "Pitch"]}
                 />
                 <ReferenceLine y={warnThresh} stroke="#f59e0b" strokeDasharray="4 2" strokeWidth={1.5} />
                 <ReferenceLine y={alertThresh} stroke="#ef4444" strokeDasharray="4 2" strokeWidth={1.5} />
