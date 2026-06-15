@@ -1,36 +1,119 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Web Bluetooth Setup (TypeScript + Linux)
 
-## Getting Started
+## 1. Add Web Bluetooth Type Definitions
 
-First, run the development server:
+บางครั้งการติดตั้งแพ็กเกจอย่างเดียวอาจยังไม่เพียงพอ จำเป็นต้องแจ้งให้ TypeScript โหลด type definitions ของ Web Bluetooth เพิ่มเติมด้วย
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+เปิดไฟล์ `tsconfig.json` (ที่อยู่ใน root ของโปรเจกต์) แล้วเพิ่ม `"types": ["web-bluetooth"]` ภายใน `compilerOptions`
+
+```json
+{
+  "compilerOptions": {
+    "target": "es5",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+
+    // 👇 เพิ่มบรรทัดนี้เข้าไป 👇
+    "types": ["web-bluetooth"]
+    
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts"
+  ],
+  "exclude": ["node_modules"]
+}
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+---
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 2. Enable Web Bluetooth on Linux (Chrome Flags)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+บน Linux บางครั้งฟีเจอร์ Web Bluetooth ยังถูกปิดไว้โดยค่าเริ่มต้น จำเป็นต้องเปิดผ่าน Chrome Flags
 
-## Learn More
+### Step 1: Enable Experimental Web Platform Features
 
-To learn more about Next.js, take a look at the following resources:
+เปิด URL ต่อไปนี้ใน Chrome:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```text
+chrome://flags/#enable-experimental-web-platform-features
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+เปลี่ยนค่า:
 
-## Deploy on Vercel
+```text
+Experimental Web Platform features
+Default/Disabled → Enabled
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+### Step 2: Enable Web Bluetooth
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+ค้นหาคำว่า **Web Bluetooth** ในหน้า `chrome://flags`
+
+หรือเปิดโดยตรง:
+
+```text
+chrome://flags/#enable-web-bluetooth
+```
+
+แล้วตั้งค่าเป็น:
+
+```text
+Enabled
+```
+
+### Step 3: Restart Chrome
+
+กดปุ่ม **Relaunch** ที่มุมขวาล่างเพื่อรีสตาร์ทเบราว์เซอร์
+
+---
+
+## 3. iPhone / iPad Users
+
+Safari บน iOS/iPadOS ยังไม่รองรับ Web Bluetooth API โดยตรง ดังนั้นหากใช้งานบน iPhone หรือ iPad แนะนำให้ใช้เบราว์เซอร์
+:contentReference[oaicite:0]{index=0}
+ซึ่งรองรับ Web Bluetooth และสามารถใช้งานกับอุปกรณ์ BLE ได้
+
+**วิธีใช้งาน**
+
+1. ติดตั้งแอป Bluefy จาก App Store
+2. เปิดเว็บไซต์ของโปรเจกต์ผ่านแอป Bluefy
+3. กดปุ่ม **Connect**
+4. เลือกอุปกรณ์ BLE ที่ต้องการเชื่อมต่อ
+
+---
+
+## 4. Test the Application
+
+หลังจากตั้งค่าเรียบร้อยแล้ว:
+
+1. เปิดหน้า
+
+```text
+http://localhost:5500/ble.html
+```
+
+2. กดปุ่ม **Connect**
+
+หากตั้งค่าถูกต้อง หน้าต่างสำหรับสแกนอุปกรณ์ BLE ควรปรากฏขึ้น และสามารถเชื่อมต่ออุปกรณ์ได้ตามปกติ ✅
