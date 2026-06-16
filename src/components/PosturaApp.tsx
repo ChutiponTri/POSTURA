@@ -549,9 +549,9 @@ export default function PosturaApp() {
       await new Promise((r) => setTimeout(r, 200));
 
       // Step 3: pull stored logs — device will stream them as notifications
-      setConnStatus("pulling");
-      pendingPayloadRef.current = "";
-      await rxChar?.writeValue(encoder.encode("GET"));
+      // setConnStatus("pulling");
+      // pendingPayloadRef.current = "";
+      // await rxChar?.writeValue(encoder.encode("GET"));
       // connStatus → "live" once EOF is received in handleNotification
 
     } catch (err) {
@@ -589,6 +589,23 @@ export default function PosturaApp() {
       alert("Settings saved to device ✓");
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const recalibrateDevice = async () => {
+    const rx = rxCharRef;
+    if (!isConnected || !rx) return alert("Please connect first.");
+    
+    // ถามยืนยันเพื่อให้ผู้ใช้เตรียมตัวนั่ง/ยืนหลังตรง
+    if (!confirm("Stand straight and keep still. Start calibration?")) return;
+    
+    try {
+      const encoder = new TextEncoder();
+      await rx.writeValue(encoder.encode("CALIB"));
+      alert("Calibration started. Please hold still for 3 seconds.");
+    } catch (e) {
+      console.error(e);
+      alert("Failed to send calibration command.");
     }
   };
 
@@ -1063,12 +1080,24 @@ export default function PosturaApp() {
           </div>
         </div>
 
-        <button
-          onClick={applySettingsToDevice}
-          className="w-full bg-purple-50 text-[#655DDD] font-bold py-3 rounded-xl hover:bg-purple-100 transition-colors text-sm"
-        >
-          Save to Device
-        </button>
+        {/* ─── Buttons Area ─── */}
+        <div className="space-y-3 pt-2">
+          <button
+            onClick={applySettingsToDevice}
+            className="w-full bg-purple-50 text-[#655DDD] font-bold py-3 rounded-xl hover:bg-purple-100 transition-colors text-sm"
+          >
+            Save to Device
+          </button>
+
+          <button
+            onClick={recalibrateDevice}
+            className="w-full border-2 border-slate-100 text-slate-600 font-bold py-3 rounded-xl hover:bg-slate-50 transition-colors text-sm flex items-center justify-center gap-2"
+          >
+            {/* ดึงไอคอน Target มาใช้ ถ้าคุณมีการ import Target จาก lucide-react ไว้แล้ว */}
+            <Target size={16} className="text-slate-400" />
+            Recalibrate Device
+          </button>
+        </div>
       </div>
 
       {/* Danger Zone */}
