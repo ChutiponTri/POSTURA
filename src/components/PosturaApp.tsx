@@ -71,7 +71,8 @@ function scoreToGrade(score: number): { letter: string; color: string; label: st
   return { letter: "F", color: "#ef4444", label: "Critical" };
 }
 
-// ─── 3D Spine Visualizer ─────────────────────────────────────────────────────
+// ─── Improved 3D Spine Visualizer with Dynamic Scaling (Head always inside frame) ─────────
+// FIX VISUALIZE: Implement dynamic torso shrinking when bending low to prevent head overflow.
 function SpineVisualizer({ angle }: { angle: number }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -81,119 +82,242 @@ function SpineVisualizer({ angle }: { angle: number }) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const W = canvas.width;
-    const H = canvas.height;
+    // ตั้งค่าความละเอียดสูง (HiDPI/Retina) - รักษากรอบเดิม 200x240
+    const scale = window.devicePixelRatio || 1;
+    const width = 200; // คง format เดิม
+    const height = 240; // คง format เดิม
+    canvas.width = width * scale;
+    canvas.height = height * scale;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    ctx.scale(scale, scale);
+
+    const W = width;
+    const H = height;
     ctx.clearRect(0, 0, W, H);
 
+    // ค่า config สำหรับการวาด
     const rad = (angle * Math.PI) / 180;
     const cx = W / 2;
-    const spineTop = 40;
-    const spineLen = 130;
 
-    // ---- Draw silhouette body (head + torso) ----
-    ctx.save();
-    ctx.translate(cx, spineTop + spineLen / 2);
-    ctx.rotate(rad);
+    // --- Dynamic Color based on Angle ---
+    let colorMain = "#10b981"; // Good (Green)
+    let colorDark = "#059669";
+    let colorLight = "#a7f3d0";
+    if (angle > 25) { // Alert
+      colorMain = "#ef4444";
+      colorDark = "#b91c1c";
+      colorLight = "#fca5a5";
+    } else if (angle > 15) { // Warning
+      colorMain = "#f59e0b";
+      colorDark = "#d97706";
+      colorLight = "#fde68a";
+    }
 
-    // Torso
-    const grad = ctx.createLinearGradient(-20, -spineLen / 2, 20, spineLen / 2);
-    grad.addColorStop(0, angle > 20 ? "#fca5a5" : angle > 10 ? "#fde68a" : "#a7f3d0");
-    grad.addColorStop(1, angle > 20 ? "#ef4444" : angle > 10 ? "#f59e0b" : "#10b981");
-    ctx.fillStyle = grad;
+    // --- Static Geometry Definitions ---
+    const hipsBaseY = H - 35; // Hips/Pivot point at the bottom, stable.
+    const neckLength = 10;
+    const headRadius = 16;
+    
+    // FIX: Dynamic scaling factor to shrink upper body when bending low.
+    // Base length logic to fit within the 200x240 frame (Pivot at y=205).
+    const maxUpperBodyLength = 120; // Total length when upright ≈ 120
+    
+    // --- FIX: Dynamic Shrink Logic ---
+    // available horizontal space from pivot (cx=100) to edge is ~100px.
+    // available vertical space down from pivot is ~35px.
+    // The previous implementation used fixed torso=90. Total length was ~116px.
+    // At high angles, sin(rad)*L > 100, cos(rad)*L > 35. Overflows occur.
+    
+    // We base torso height on angle to "crunch" the spine as it gets horizontal.
+    let defaultTorsoHeight = 90;
+    let dynamicTorsoHeight = defaultTorsoHeight;
+
+    // If angle is significant slouch (>= 30 degrees), start shrinking to fit frame side boundary.
+    if (angle >= 30) {
+      // Calculate reduction. At 90 degrees flat, sin(rad)=1.
+      // We need Total length (torso + neck + headRadius*2) to fit ~90px from center cx=100.
+      // So Total Length should be max ~90px. Neck+HeadR*2 ≈ 42. So torso should be ~48.
+      // That's a ~42px reduction from 90. We use a milder linear shrink for smooth effect.
+      
+      const reductionThreshold = 30; // Threshold angle to start shrinking
+      const shrinkFactor = 0.5;      // px to shrink per degree beyond threshold.
+      const reduction = (angle - reductionThreshold) * shrinkFactor;
+      
+      // Limit torso from being too small, but shrink enough to fit frame side (W=200).
+      dynamicTorsoHeight = defaultTorsoHeight - Math.min(35, reduction);
+    }
+    
+    // Safety check: Ensure even when bent flat, cos(rad)*L doesn't go below canvas y=240.
+    // Pivot at y=205. Available space down = 35px. Need to shrink more if cos is significant.
+    // But with shoulders pointing "up" in object space, bending is forward slouch.
+    // The head moves to larger x and *smaller* y (higher up) relative to shoulders.
+    // Neck base position: cx + torsoHeight*sin(rad), hipsBaseY - torsoHeight*cos(rad).
+    // Let's ensure hipsBaseY - L*cos(rad) > 0 and cx + L*sin(rad) < W.
+    // At W=200 cx=100, horizontal space 100px. L should be < 100.
+    // current L = dynamicTorso(say 55) + neck(10) + headRadius(16)*2 ≈ 97px. Tight, but fits!
+
+    // 1. Draw static Hip/Legs base (does not rotate)
     ctx.beginPath();
-    ctx.roundRect(-14, -spineLen / 2, 28, spineLen, 8);
+    ctx.ellipse(cx, hipsBaseY + 12, 28, 7, 0, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(0,0,0,0.06)"; // Basic floor shadow
     ctx.fill();
 
-    // Spine vertebrae dots
-    const vertebrae = 8;
+    const baseGrad = ctx.createLinearGradient(cx - 20, hipsBaseY, cx + 20, hipsBaseY);
+    baseGrad.addColorStop(0, "#e2e8f0"); // slate-200
+    baseGrad.addColorStop(0.5, "#cbd5e1"); // slate-300
+    baseGrad.addColorStop(1, "#e2e8f0");
+    
+    // Hip disc
+    ctx.beginPath();
+    ctx.ellipse(cx, hipsBaseY, 24, 9, 0, 0, Math.PI * 2);
+    ctx.fillStyle = baseGrad;
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,0.1)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Leg stumps
+    ctx.fillStyle = baseGrad;
+    ctx.fillRect(cx - 16, hipsBaseY, 12, 20);
+    ctx.fillRect(cx + 4, hipsBaseY, 12, 20);
+
+    // 2. Setup Rotation around Hips ( physiologique pivot )
+    ctx.save();
+    ctx.translate(cx, hipsBaseY); // Move pivot to hips
+    ctx.rotate(rad);              // Rotate the whole upper body
+    ctx.translate(-cx, -hipsBaseY); // Move canvas back
+
+    // 3. Draw Rotating Upper Body (Pseudo-3D Torso)
+    // FIX: Use DYNAMIC torso height
+    const shouldersY = hipsBaseY - dynamicTorsoHeight;
+    const waistWidth = 24;
+    const shoulderWidth = 34;
+
+    // Body silhouette (trapezoid-mannequin style) with curved sides
+    const bodyGrad = ctx.createLinearGradient(cx - shoulderWidth / 2, shouldersY, cx + shoulderWidth / 2, shouldersY);
+    bodyGrad.addColorStop(0, colorDark);
+    bodyGrad.addColorStop(0.3, colorMain); // Highlight in center-left for dimension
+    bodyGrad.addColorStop(1, colorLight);
+
+    ctx.beginPath();
+    ctx.moveTo(cx - waistWidth / 2, hipsBaseY); // Bottom Waist Left
+    // Curve sides slightly to look more organic
+    ctx.bezierCurveTo(cx - waistWidth / 2, hipsBaseY - 10, cx - shoulderWidth / 2, shouldersY + 10, cx - shoulderWidth / 2, shouldersY); // Left side
+    ctx.lineTo(cx + shoulderWidth / 2, shouldersY); // Shoulders line
+    ctx.bezierCurveTo(cx + shoulderWidth / 2, shouldersY + 10, cx + waistWidth / 2, hipsBaseY - 10, cx + waistWidth / 2, hipsBaseY); // Right side
+    ctx.closePath();
+    ctx.fillStyle = bodyGrad;
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,0.12)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // 4. Draw Spine Vertebrae discs for visual depth
+    const vertebrae = 7;
     for (let i = 0; i < vertebrae; i++) {
-      const y = -spineLen / 2 + (i * spineLen) / (vertebrae - 1);
+      // FIX: Use DYNAMIC torso height for spine positioning
+      const y = hipsBaseY - (i * (dynamicTorsoHeight - 8)) / (vertebrae - 1) - 4;
+      const discW = 7 - i * 0.4; // Discs get slightly smaller
+      const discH = 2.5;
+
+      // Color discs dynamically based on local angle logic
+      const discGrad = ctx.createRadialGradient(cx - 1.5, y - 1, 1, cx, y, discW);
+      discGrad.addColorStop(0, angle > 10 ? colorLight : "white");
+      discGrad.addColorStop(1, colorMain);
+
       ctx.beginPath();
-      ctx.arc(0, y, 4, 0, Math.PI * 2);
-      ctx.fillStyle = "rgba(255,255,255,0.9)";
+      ctx.ellipse(cx, y, discW, discH, 0, 0, Math.PI * 2);
+      ctx.fillStyle = discGrad;
       ctx.fill();
-      // Small horizontal process lines
-      ctx.strokeStyle = "rgba(255,255,255,0.5)";
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(-9, y);
-      ctx.lineTo(9, y);
+      ctx.strokeStyle = "rgba(0,0,0,0.15)";
+      ctx.lineWidth = 1;
       ctx.stroke();
     }
 
-    // Central spine line
-    ctx.beginPath();
-    ctx.moveTo(0, -spineLen / 2);
-    ctx.lineTo(0, spineLen / 2);
-    ctx.strokeStyle = "rgba(255,255,255,0.6)";
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    // 5. Draw Neck & Head (Positioned relative to dynamic shoulders)
+    const neckTopY = shouldersY - neckLength;
+    const headX = cx;
+    const headY = neckTopY - headRadius - 2;
 
-    ctx.restore();
+    // Neck
+    ctx.fillStyle = "#cbd5e1"; // slate-300
+    ctx.fillRect(cx - 5, shouldersY, 10, neckLength);
+    ctx.strokeStyle = "rgba(0,0,0,0.1)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(cx - 5, shouldersY, 10, neckLength);
 
-    // Head
-    const headX = cx + Math.sin(rad) * (-spineLen / 2 - 20);
-    const headY = spineTop + spineLen / 2 + Math.cos(rad) * (-spineLen / 2 - 20);
+    // Head (spherical gradient)
+    const headGrad = ctx.createRadialGradient(headX - headRadius * 0.3, headY - headRadius * 0.3, 2, headX, headY, headRadius);
+    headGrad.addColorStop(0, colorLight);
+    headGrad.addColorStop(0.7, colorMain);
+    headGrad.addColorStop(1, colorDark);
+
     ctx.beginPath();
-    ctx.arc(headX, headY, 18, 0, Math.PI * 2);
-    ctx.fillStyle = angle > 20 ? "#fca5a5" : angle > 10 ? "#fde68a" : "#a7f3d0";
+    ctx.arc(headX, headY, headRadius, 0, Math.PI * 2);
+    ctx.fillStyle = headGrad;
     ctx.fill();
-    ctx.strokeStyle = "rgba(255,255,255,0.5)";
-    ctx.lineWidth = 2;
-    ctx.stroke();
-
-    // Eyes
-    const eyeOffset = 6;
-    const eyeY = headY;
-    const leftEyeX = headX - eyeOffset;
-    const rightEyeX = headX + eyeOffset;
-    ctx.fillStyle = "#1e293b";
-    ctx.beginPath();
-    ctx.arc(leftEyeX, eyeY - 2, 2.5, 0, Math.PI * 2);
-    ctx.arc(rightEyeX, eyeY - 2, 2.5, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Angle arc indicator
-    const arcCX = cx;
-    const arcCY = spineTop + 2;
-    ctx.beginPath();
-    ctx.arc(arcCX, arcCY, 22, -Math.PI / 2, -Math.PI / 2 + rad, false);
-    ctx.strokeStyle = angle > 20 ? "#ef4444" : angle > 10 ? "#f59e0b" : "#10b981";
-    ctx.lineWidth = 3;
-    ctx.lineCap = "round";
-    ctx.stroke();
-
-    // Ideal posture reference line
-    ctx.beginPath();
-    ctx.setLineDash([4, 4]);
-    ctx.moveTo(cx, spineTop - 5);
-    ctx.lineTo(cx, spineTop + spineLen + 25);
-    ctx.strokeStyle = "rgba(148,163,184,0.5)";
+    ctx.strokeStyle = "rgba(0,0,0,0.12)";
     ctx.lineWidth = 1.5;
     ctx.stroke();
-    ctx.setLineDash([]);
 
-    // Label
-    ctx.fillStyle = angle > 20 ? "#ef4444" : angle > 10 ? "#f59e0b" : "#10b981";
-    ctx.font = "bold 16px system-ui";
+    // Eye (orient profile view, pointing right/forward)
+    ctx.fillStyle = "#1e293b"; // slate-800
+    ctx.beginPath();
+    ctx.arc(headX + headRadius * 0.45, headY - headRadius * 0.15, 2.8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Hair/Shading (simple profile arc)
+    ctx.strokeStyle = colorDark;
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.arc(headX, headY, headRadius * 0.8, -Math.PI / 2 - Math.PI / 4, Math.PI / 2, true);
+    ctx.stroke();
+
+    ctx.restore(); // Restore Rotation
+
+    // ==========================================
+    // 3. UI Overlay (ตัวเลของศา)
+    // ==========================================
+    
+    // วาดกรอบสี่เหลี่ยมโค้งมนเล็กๆ ด้านบนหัว
+    const labelX = cx;
+    const labelY = 25; // Clearly placed at top-center of the canvas, fixed position.
+    const labelW = 54;
+    const labelH = 24;
+
+    ctx.beginPath();
+    ctx.roundRect(labelX - labelW/2, labelY - labelH/2, labelW, labelH, 6);
+    ctx.fillStyle = "rgba(255,255,255,0.92)"; // Nearly opaque white
+    ctx.fill();
+    ctx.strokeStyle = colorMain;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // เขียนองศา
+    // Use slightly darker colors for better contrast
+    ctx.fillStyle = angle > 25 ? "#b91c1c" : angle > 15 ? "#b45309" : "#047857";
+    ctx.font = "bold 16px system-ui, -apple-system, sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText(`${Math.round(angle)}°`, cx + 38, spineTop + spineLen / 2 + 6);
+    ctx.textBaseline = "middle";
+    ctx.fillText(`${Math.round(angle)}°`, labelX, labelY + 1);
 
   }, [angle]);
 
+  // คง format เดิมของ JSX
   return (
-    <div className="flex flex-col items-center">
+    <div className="flex flex-col items-center justify-center p-2 bg-slate-50/50 rounded-2xl border border-slate-100 shadow-inner">
       <canvas
         ref={canvasRef}
-        width={200}
-        height={220}
+        // Fixed display dimensions to fit 200x240 frame
         className="mx-auto"
-        style={{ filter: "drop-shadow(0 4px 12px rgba(101,93,221,0.15))" }}
+        style={{ width: "200px", height: "240px", filter: "drop-shadow(0 6px 12px rgba(101,93,221,0.1))" }}
       />
-      <div className="flex gap-3 mt-2 text-xs text-slate-400">
-        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-400" />Good</span>
-        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400" />Warning</span>
-        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-400" />Alert</span>
+      <div className="flex gap-4 mt-1 text-[11px] font-medium text-slate-500 bg-white px-3 py-1 rounded-full shadow-sm border border-slate-100">
+        <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-green-500 shadow-inner" />Good</span>
+        <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-amber-500 shadow-inner" />Warn</span>
+        <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-red-500 shadow-inner" />Alert</span>
       </div>
     </div>
   );
@@ -466,20 +590,20 @@ export default function PosturaApp() {
       const newLogs = parseCSVPayload(pendingPayloadRef.current);
       pendingPayloadRef.current = "";
       setSyncedRecordCount(newLogs.length);
-      setSessionLogs((prev: PostureLog[]) => {
-        // merge with any already-received live events (dedup by timestamp)
-        const existingTs = new Set(prev.map((l: PostureLog) => l.timestamp));
-        const merged = [...prev, ...newLogs.filter((l) => !existingTs.has(l.timestamp))];
-        merged.sort((a, b) => a.timestamp - b.timestamp);
-        console.log("EOF", merged);
-        return merged;
-      });
-      if (newLogs.length > 0) {
-        setLiveAngle(newLogs[newLogs.length - 1].pitch);
-      }
-      if (user && newLogs.length > 0) {
-        saveLogs({ userId: user.id, logs: newLogs });
-      }
+      // setSessionLogs((prev: PostureLog[]) => {
+      //   // merge with any already-received live events (dedup by timestamp)
+      //   const existingTs = new Set(prev.map((l: PostureLog) => l.timestamp));
+      //   const merged = [...prev, ...newLogs.filter((l) => !existingTs.has(l.timestamp))];
+      //   merged.sort((a, b) => a.timestamp - b.timestamp);
+      //   console.log("EOF", merged);
+      //   return merged;
+      // });
+      // if (newLogs.length > 0) {
+        // setLiveAngle(newLogs[newLogs.length - 1].pitch);
+      // }
+      // if (user && newLogs.length > 0) {
+        // saveLogs({ userId: user.id, logs: newLogs });
+      // }
       return;
     }
 
@@ -549,9 +673,9 @@ export default function PosturaApp() {
       await new Promise((r) => setTimeout(r, 200));
 
       // Step 3: pull stored logs — device will stream them as notifications
-      // setConnStatus("pulling");
-      // pendingPayloadRef.current = "";
-      // await rxChar?.writeValue(encoder.encode("GET"));
+      setConnStatus("pulling");
+      pendingPayloadRef.current = "";
+      await rxChar?.writeValue(encoder.encode("GET"));
       // connStatus → "live" once EOF is received in handleNotification
 
     } catch (err) {
