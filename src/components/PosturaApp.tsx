@@ -423,7 +423,7 @@ export default function PosturaApp() {
   const badLogs = todayLogs.filter((l) => l.state > 0);
   // firmware logs bad events every 5s interval; good time isn't tracked in hardware
   // badTimeMin = confirmed bad; goodTimeMin shown only after sync (can't know without sync)
-  const badTimeMin = Math.round((badLogs.length * 5) / 60);
+  const badTimeMin = Math.round((badLogs.length * 2) / 60);
   const goodTimeMin = null; // not available from firmware — only bad events are stored
   const alertLogs = todayLogs.filter((l) => l.state === 2);
 
