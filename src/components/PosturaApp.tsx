@@ -408,24 +408,70 @@ export default function PosturaApp() {
 
   // Convex
   const saveLogs = useMutation(api.posture.saveLogsBatch);
-  const historicalLogs = useQuery(
-    api.posture.getLogs,
-    user ? { userId: user.id, limitDays: 7 } : "skip"
+
+  // 1. หาเวลาเริ่มต้นของวันนี้
+  const todayStartTs = new Date().setHours(0, 0, 0, 0) / 1000;
+
+  // 2. ดึง Raw Logs เฉพาะวันนี้ (อัปเดตเมื่อมี Live event)
+  const todayHistoricalLogs = useQuery(
+    api.posture.getTodayLogs,
+    user ? { userId: user.id, startTs: todayStartTs } : "skip"
+  );
+
+  // 3. ดึง Summary 7 วัน (จะอัปเดตแค่วันละครั้ง ตาม Cron Job หรือตอนจบวัน)
+  const weeklySummary = useQuery(
+    api.posture.getWeeklySummary,
+    user ? { userId: user.id } : "skip"
   );
 
   // ── Derived metrics ──────────────────────────────────────────────────────────
-  const allLogs = [...(historicalLogs ?? []), ...sessionLogs];
 
-  const todayTs = new Date().setHours(0, 0, 0, 0) / 1000;
-  const todayLogs = allLogs.filter((l) => l.timestamp >= todayTs);
+  // รวมข้อมูลวันนี้จาก DB เข้ากับข้อมูล Live ที่ยังไม่ได้ Sync หรือเพิ่งส่งเข้ามา
+  const todayLogs = [...(todayHistoricalLogs ?? []), ...sessionLogs].sort((a, b) => a.timestamp - b.timestamp);
 
-  const totalRecords = todayLogs.length;
-  const badLogs = todayLogs.filter((l) => l.state > 0);
-  // firmware logs bad events every 5s interval; good time isn't tracked in hardware
-  // badTimeMin = confirmed bad; goodTimeMin shown only after sync (can't know without sync)
+  // ลบซ้ำ (Deduplicate) เผื่อ Live Event ทับซ้อนกับที่เพิ่งดึงมาจาก DB
+  const uniqueTodayLogs = Array.from(new Map(todayLogs.map(item => [item.timestamp, item])).values());
+
+  const totalRecords = uniqueTodayLogs.length;
+  const badLogs = uniqueTodayLogs.filter((l) => l.state > 0);
   const badTimeMin = Math.round((badLogs.length * 2) / 60);
-  const goodTimeMin = null; // not available from firmware — only bad events are stored
-  const alertLogs = todayLogs.filter((l) => l.state === 2);
+  const alertLogs = uniqueTodayLogs.filter((l) => l.state === 2);
+
+  // Hourly bar data for today (คำนวณจาก uniqueTodayLogs)
+  const hourlyData = Array.from({ length: 24 }, (_, h) => {
+    const hLogs = uniqueTodayLogs.filter((l) => {
+      const d = new Date(l.timestamp * 1000);
+      return d.getHours() === h;
+    });
+    const bad = hLogs.filter((l) => l.state > 0).length;
+    const total = hLogs.length;
+    return {
+      hour: `${h}:00`,
+      bad,
+      good: total - bad,
+      score: total === 0 ? null : Math.round(((total - bad) / total) * 100),
+    };
+  }).filter((d) => d.good + d.bad > 0);
+
+  // 7-day trend (ดึงจาก weeklySummary แทนการมา Loop คำนวณเอง)
+  const weeklyData = (weeklySummary ?? []).map((summary) => {
+    // สมมติว่า dateString อยู่ใน format "YYYY-MM-DD"
+    const label = new Date(summary.dateString).toLocaleDateString("en", { weekday: "short" });
+    return { 
+      day: label, 
+      score: summary.avgScore, 
+      sessions: summary.totalSessions 
+    };
+  });
+
+  // Worst hours และ Streak
+  const worstHours = [...hourlyData]
+    .filter((d) => d.score !== null)
+    .sort((a, b) => (a.score ?? 0) - (b.score ?? 0))
+    .slice(0, 3);
+
+  const streakDays = weeklyData.filter((d) => d.score !== null && d.score >= 70).length;
+
 
 
   const [postureScore, setPostureScore] = useState<number>(100);
@@ -441,43 +487,6 @@ export default function PosturaApp() {
   //     : Math.max(0, Math.round(100 - (badLogs.length / totalRecords) * 100 - alertLogs.length * 2));
 
   // const grade = scoreToGrade(postureScore ?? 100);
-
-  // Hourly bar data for today
-  const hourlyData = Array.from({ length: 24 }, (_, h) => {
-    const hLogs = todayLogs.filter((l) => {
-      const d = new Date(l.timestamp * 1000);
-      return d.getHours() === h;
-    });
-    const bad = hLogs.filter((l) => l.state > 0).length;
-    const total = hLogs.length;
-    return {
-      hour: `${h}:00`,
-      bad,
-      good: total - bad,
-      score: total === 0 ? null : Math.round(((total - bad) / total) * 100),
-    };
-  }).filter((d) => d.good + d.bad > 0);
-
-  // 7-day trend
-  const weeklyData = Array.from({ length: 7 }, (_, i) => {
-    const dayStart = (new Date().setHours(0, 0, 0, 0) / 1000) - i * 86400;
-    const dayEnd = dayStart + 86400;
-    const dayLogs = allLogs.filter((l) => l.timestamp >= dayStart && l.timestamp < dayEnd);
-    const bad = dayLogs.filter((l) => l.state > 0).length;
-    const total = dayLogs.length;
-    const dayScore = total === 0 ? null : Math.round(((total - bad) / total) * 100);
-    const label = new Date(dayStart * 1000).toLocaleDateString("en", { weekday: "short" });
-    return { day: label, score: dayScore, sessions: total };
-  }).reverse();
-
-  // Worst hours
-  const worstHours = [...hourlyData]
-    .filter((d) => d.score !== null)
-    .sort((a, b) => (a.score ?? 0) - (b.score ?? 0))
-    .slice(0, 3);
-
-  // Streak
-  const streakDays = weeklyData.filter((d: { score: number | null; day: string; sessions: number }) => d.score !== null && d.score >= 70).length;
 
   // ── BLE Core ─────────────────────────────────────────────────────────────────
   //
@@ -500,12 +509,12 @@ export default function PosturaApp() {
   //   After EOF, historical pull is done; notifications keep streaming live events.
 
   useEffect(() => {
-    if (historicalLogs && historicalLogs.length > 0) {
+    if (todayHistoricalLogs && todayHistoricalLogs.length > 0) {
       // 1. หาเวลาเริ่มต้นของวันนี้ (00:00:00) และแปลงเป็น Unix Timestamp (วินาที)
       const todayStartTs = new Date().setHours(0, 0, 0, 0) / 1000;
 
       // 2. คัดกรองเอาเฉพาะ Log ที่เกิดขึ้นตั้งแต่เที่ยงคืนของวันนี้เป็นต้นมา
-      const todayLogs = historicalLogs.filter(log => log.timestamp >= todayStartTs);
+      const todayLogs = todayHistoricalLogs.filter(log => log.timestamp >= todayStartTs);
 
       // 3. ถ้าวันนี้มีข้อมูล ค่อยเอาไปเซ็ตค่า
       if (todayLogs.length > 0) {
@@ -513,7 +522,7 @@ export default function PosturaApp() {
         setSessionLogs(todayLogs); // เก็บเข้า Session เฉพาะของวันนี้
       }
     }
-  }, [historicalLogs]);
+  }, [todayHistoricalLogs]);
 
   useEffect(() => {
     // 1. ดึงจำนวนข้อมูลเฉพาะที่เกิดขึ้นในเซสชัน Live เท่านั้น

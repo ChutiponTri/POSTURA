@@ -8,7 +8,9 @@
  * @module
  */
 
+import type * as cron from "../cron.js";
 import type * as posture from "../posture.js";
+import type * as tasks from "../tasks.js";
 
 import type {
   ApiFromModules,
@@ -17,7 +19,9 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  cron: typeof cron;
   posture: typeof posture;
+  tasks: typeof tasks;
 }>;
 
 /**

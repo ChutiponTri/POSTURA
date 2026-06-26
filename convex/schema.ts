@@ -5,10 +5,23 @@ import { v } from "convex/values";
 export default defineSchema({
   postureLogs: defineTable({
     userId: v.string(),
-    timestamp: v.number(),  // Unix seconds
-    pitch: v.number(),      // degrees
-    state: v.number(),      // 1=warn, 2=alert
+    timestamp: v.number(),  
+    pitch: v.number(),      
+    state: v.number(),      
   })
     .index("by_user", ["userId"])
-    .index("by_user_time", ["userId", "timestamp"]),
+    .index("by_user_time", ["userId", "timestamp"])
+    // 👇 เพิ่ม Index นี้ เพื่อให้ Cron Job ดึงข้อมูลตามเวลาได้รวดเร็ว
+    .index("by_timestamp", ["timestamp"]), 
+
+  dailyPostureSummaries: defineTable({
+    userId: v.string(),
+    dateString: v.string(), 
+    totalSessions: v.number(),
+    badPostureTime: v.number(), 
+    alertCount: v.number(),
+    avgScore: v.number(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_user_date", ["userId", "dateString"]),
 });

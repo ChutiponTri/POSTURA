@@ -15,14 +15,24 @@ export const saveLogsBatch = mutation({
     ),
   },
   handler: async (ctx, { userId, logs }) => {
-    // Deduplicate: only insert if timestamp not already stored for this user
+    if (logs.length === 0) return { inserted: 0, skipped: 0 };
+
+    // 1. หาช่วงเวลาของ Batch นี้
+    const timestamps = logs.map(l => l.timestamp);
+    const minTs = Math.min(...timestamps);
+    const maxTs = Math.max(...timestamps);
+
+    // 2. Query เช็คซ้ำเฉพาะช่วงเวลาที่มีใน Batch (ประหยัด Read มหาศาล)
     const existing = await ctx.db
       .query("postureLogs")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .withIndex("by_user_time", (q) => 
+        q.eq("userId", userId)
+         .gte("timestamp", minTs)
+         .lte("timestamp", maxTs)
+      )
       .collect();
 
     const existingTs = new Set(existing.map((e) => e.timestamp));
-
     const toInsert = logs.filter((l) => !existingTs.has(l.timestamp));
 
     for (const log of toInsert) {
@@ -33,6 +43,9 @@ export const saveLogsBatch = mutation({
         state: log.state,
       });
     }
+
+    // Optional: ถ้าจะอัปเดตตาราง Summary ทันที สามารถเขียน Logic ตรงนี้เพิ่มได้
+    // แต่แนะนำให้แยกไปทำผ่าน Convex Crons จะดีกว่าเพื่อไม่ให้ Mutation นี้หนักเกินไป
 
     return { inserted: toInsert.length, skipped: logs.length - toInsert.length };
   },
@@ -75,5 +88,45 @@ export const clearLogs = mutation({
       await ctx.db.delete(log._id);
     }
     return { deleted: logs.length };
+  },
+});
+
+// ── ดึงข้อมูล Raw Logs เฉพาะของวันนี้ ──────────────────────────────────────
+export const getTodayLogs = query({
+  args: {
+    userId: v.string(),
+    startTs: v.number(), // รับเวลาเที่ยงคืนของวันนี้จาก Client
+  },
+  handler: async (ctx, { userId, startTs }) => {
+    // ดึงเฉพาะข้อมูลของวันนี้ ช่วยลด Read Quota ไปได้มหาศาล
+    const logs = await ctx.db
+      .query("postureLogs")
+      .withIndex("by_user_time", (q) =>
+        q.eq("userId", userId).gte("timestamp", startTs)
+      )
+      .order("asc")
+      .collect();
+
+    return logs.map((l) => ({
+      timestamp: l.timestamp,
+      pitch: l.pitch,
+      state: l.state,
+    }));
+  },
+});
+
+// ── ดึงข้อมูลสรุปรายวัน ย้อนหลัง 7 วัน (ดึงจากตาราง Summary ที่เพิ่งสร้าง) ───────
+export const getWeeklySummary = query({
+  args: { userId: v.string() },
+  handler: async (ctx, { userId }) => {
+    // สมมติว่ามีตาราง dailyPostureSummaries แล้ว
+    // Query นี้จะคืนค่าแค่ 7 แถว (7 วัน) ทำให้เบามากและไม่อัปเดตพร่ำเพรื่อ
+    const summaries = await ctx.db
+      .query("dailyPostureSummaries")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .order("desc")
+      .take(7);
+
+    return summaries.reverse(); // ให้เรียงจากเก่าไปใหม่สำหรับกราฟ
   },
 });
