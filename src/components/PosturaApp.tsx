@@ -425,11 +425,9 @@ export default function PosturaApp() {
   );
 
   // ── Derived metrics ──────────────────────────────────────────────────────────
-
-  // รวมข้อมูลวันนี้จาก DB เข้ากับข้อมูล Live ที่ยังไม่ได้ Sync หรือเพิ่งส่งเข้ามา
+  
+  // 1. จัดการข้อมูลเฉพาะของ "วันนี้"
   const todayLogs = [...(todayHistoricalLogs ?? []), ...sessionLogs].sort((a, b) => a.timestamp - b.timestamp);
-
-  // ลบซ้ำ (Deduplicate) เผื่อ Live Event ทับซ้อนกับที่เพิ่งดึงมาจาก DB
   const uniqueTodayLogs = Array.from(new Map(todayLogs.map(item => [item.timestamp, item])).values());
 
   const totalRecords = uniqueTodayLogs.length;
@@ -437,7 +435,10 @@ export default function PosturaApp() {
   const badTimeMin = Math.round((badLogs.length * 2) / 60);
   const alertLogs = uniqueTodayLogs.filter((l) => l.state === 2);
 
-  // Hourly bar data for today (คำนวณจาก uniqueTodayLogs)
+  const [postureScore, setPostureScore] = useState<number>(100);
+  const [grade, setGrade] = useState<Grade>({ letter: "A", color: "#10b981", label: "Excellent" });
+
+  // Hourly bar data for today
   const hourlyData = Array.from({ length: 24 }, (_, h) => {
     const hLogs = uniqueTodayLogs.filter((l) => {
       const d = new Date(l.timestamp * 1000);
@@ -453,29 +454,30 @@ export default function PosturaApp() {
     };
   }).filter((d) => d.good + d.bad > 0);
 
-  // 7-day trend (ดึงจาก weeklySummary แทนการมา Loop คำนวณเอง)
-  const weeklyData = (weeklySummary ?? []).map((summary) => {
-    // สมมติว่า dateString อยู่ใน format "YYYY-MM-DD"
-    const label = new Date(summary.dateString).toLocaleDateString("en", { weekday: "short" });
-    return { 
-      day: label, 
-      score: summary.avgScore, 
-      sessions: summary.totalSessions 
-    };
+  // 2. จัดการข้อมูล "ย้อนหลัง 7 วัน" (ดึงจาก DB 6 วัน + รวมข้อมูลสดวันนี้ 1 วัน)
+  const weeklyData = Array.from({ length: 7 }, (_, i) => {
+    const targetDate = new Date();
+    targetDate.setDate(targetDate.getDate() - (6 - i));
+    const dateString = targetDate.toISOString().split("T")[0];
+    const label = targetDate.toLocaleDateString("en", { weekday: "short" });
+
+    if (i === 6) {
+      // สำหรับ "วันนี้" ให้ใช้ข้อมูล Real-time
+      return { day: label, score: totalRecords === 0 ? null : postureScore, sessions: totalRecords };
+    } else {
+      // สำหรับ "อดีต" ให้หาจากค่าสรุปใน DB
+      const pastSummary = (weeklySummary ?? []).find(s => s.dateString === dateString);
+      return { day: label, score: pastSummary ? pastSummary.avgScore : null, sessions: pastSummary ? pastSummary.totalSessions : 0 };
+    }
   });
 
-  // Worst hours และ Streak
   const worstHours = [...hourlyData]
     .filter((d) => d.score !== null)
     .sort((a, b) => (a.score ?? 0) - (b.score ?? 0))
     .slice(0, 3);
 
   const streakDays = weeklyData.filter((d) => d.score !== null && d.score >= 70).length;
-
-
-
-  const [postureScore, setPostureScore] = useState<number>(100);
-  const [grade, setGrade] = useState<Grade>({ letter: "A", color: "#10b981", label: "Excellent" });
+  const goodDaysCount = weeklyData.filter((d) => d.score !== null && d.score >= 70).length;
 
 
   // firmware only records bad events — "0 records after sync" means perfect posture
@@ -510,17 +512,8 @@ export default function PosturaApp() {
 
   useEffect(() => {
     if (todayHistoricalLogs && todayHistoricalLogs.length > 0) {
-      // 1. หาเวลาเริ่มต้นของวันนี้ (00:00:00) และแปลงเป็น Unix Timestamp (วินาที)
-      const todayStartTs = new Date().setHours(0, 0, 0, 0) / 1000;
-
-      // 2. คัดกรองเอาเฉพาะ Log ที่เกิดขึ้นตั้งแต่เที่ยงคืนของวันนี้เป็นต้นมา
-      const todayLogs = todayHistoricalLogs.filter(log => log.timestamp >= todayStartTs);
-
-      // 3. ถ้าวันนี้มีข้อมูล ค่อยเอาไปเซ็ตค่า
-      if (todayLogs.length > 0) {
-        setLiveAngle(todayLogs[todayLogs.length - 1].pitch); // ดึงมุมล่าวุดของวันนี้
-        setSessionLogs(todayLogs); // เก็บเข้า Session เฉพาะของวันนี้
-      }
+      setLiveAngle(todayHistoricalLogs[todayHistoricalLogs.length - 1].pitch);
+      setSessionLogs(todayHistoricalLogs);
     }
   }, [todayHistoricalLogs]);
 
@@ -1040,8 +1033,11 @@ export default function PosturaApp() {
 
   // ─── Tab: Progress ───────────────────────────────────────────────────────────
   const renderProgress = () => {
-    const avgScore = weeklyData.filter((d) => d.score !== null).reduce((a, b) => a + (b.score ?? 0), 0) /
-      Math.max(1, weeklyData.filter((d) => d.score !== null).length);
+    // ใช้ weeklyData ตัวใหม่ในการคำนวณ (ซึ่งรวมค่า real-time ของวันนี้แล้ว)
+    const validDays = weeklyData.filter((d) => d.score !== null);
+    const avgScore = validDays.length > 0 
+      ? validDays.reduce((sum, d) => sum + (d.score ?? 0), 0) / validDays.length 
+      : 0;
 
     const goals = [
       { id: "score", label: "Score ≥ 80 today", done: (postureScore ?? 0) >= 80, value: postureScore ?? 0, max: 80 },
@@ -1067,7 +1063,7 @@ export default function PosturaApp() {
               <p className="text-xs opacity-70">Day streak</p>
             </div>
             <div className="border-l border-white/20 pl-5">
-              <p className="text-3xl font-bold">{weeklyData.filter((d: { score: number | null; day: string; sessions: number }) => d.score !== null && d.score >= 70).length}</p>
+              <p className="text-3xl font-bold">{goodDaysCount}</p>
               <p className="text-xs opacity-70">Good days</p>
             </div>
           </div>
